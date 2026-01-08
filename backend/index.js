@@ -203,6 +203,177 @@ app.post('/api/inventory', async (req, res) => {
   }
 });
 
+app.post('/api/sales', async (req, res) => {
+  const { product_id, batch_id, quantity, price } = req.body;
+  try {
+    // 1. Catat log penjualan
+    await pool.query(
+      'INSERT INTO sales_logs (product_id, batch_id, quantity_sold, price_at_sale) VALUES ($1, $2, $3, $4)',
+      [product_id, batch_id, quantity, price]
+    );
+
+    // 2. Kurangi stok di product_batches
+    await pool.query(
+      'UPDATE product_batches SET current_stock = current_stock - $1 WHERE id = $2',
+      [quantity, batch_id]
+    );
+
+    res.json({ message: "Transaksi berhasil dicatat!" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. API Feedback (Human-in-the-Loop dengan Guided Update)
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { state_id, action_taken, feedback_type, custom_discount } = req.body;
+    const alpha = 0.2;
+    let reward = 0;
+
+    // A. REWARD DASAR DARI FEEDBACK
+    if (feedback_type === 'APPROVE') reward = 15; // User setuju, kasih reward besar
+    else if (feedback_type === 'REJECT') reward = -10; // User tidak setuju
+
+    // B. LOGIKA GUIDED UPDATE (Koreksi Manual)
+    if (custom_discount !== undefined) {
+      const suggestedAction = `a_${action_taken}`; // Aksi asli AI
+      const correctedAction = `a_${custom_discount}`; // Aksi pilihan User
+
+      // 1. Berikan punishment pada aksi yang salah menurut user
+      await pool.query(
+        `UPDATE q_table SET ${suggestedAction} = ${suggestedAction} - 10 WHERE state_id = $1`,
+        [state_id]
+      );
+
+      // 2. Berikan "Supervised Signal" (Reward instan) pada aksi pilihan user
+      // Ini membuat AI langsung "paham" ke mana arah yang benar
+      await pool.query(
+        `UPDATE q_table SET ${correctedAction} = ${correctedAction} + 20 WHERE state_id = $1`,
+        [state_id]
+      );
+    }
+
+    // C. UPDATE Q-TABLE STANDAR (Bellman)
+    // Tetap jalankan update standar agar AI belajar secara inkremental
+    const updateQuery = `
+            UPDATE q_table 
+            SET a_${action_taken} = a_${action_taken} + ($1 * ($2 - a_${action_taken}))
+            WHERE state_id = $3
+        `;
+    await pool.query(updateQuery, [alpha, reward, state_id]);
+    
+    res.json({ message: "AI telah menerima arahan manusia!", state: state_id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/products/list', async (req, res) => {
+  try {
+    const query = `
+      SELECT p.id, p.name 
+      FROM products p 
+      JOIN product_batches b ON p.id = b.product_id 
+      WHERE b.current_stock > 0 
+      GROUP BY p.id, p.name
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API untuk menjalankan komparasi 3 skenario (Research Lab)
+// backend/index.js - Update Endpoint Simulasi Komparasi
+app.get('/api/simulation/compare', async (req, res) => {
+    const { productId } = req.query;
+    if (!productId) return res.status(400).json({ error: "Product ID diperlukan" });    
+    // Ambil data produk asli dari DB agar harga modal/jual akurat
+    const productData = await pool.query(`
+        SELECT p.*, b.current_stock 
+        FROM products p 
+        JOIN product_batches b ON p.id = b.product_id 
+        WHERE p.id = $1 LIMIT 1
+    `, [productId]);
+
+    if (productData.rows.length === 0) return res.status(404).send("Produk tidak ditemukan");
+
+    const p = productData.rows[0];
+    const INITIAL_STOCK = p.current_stock;
+    const BASE_PRICE = parseFloat(p.base_price);
+    const NORMAL_PRICE = parseFloat(p.normal_price);
+
+    const runScenario = async (type) => {
+        let stock = INITIAL_STOCK;
+        let totalProfit = 0;
+        let history = [];
+        const DAYS = 30;
+
+        for (let d = 1; d <= DAYS; d++) {
+            let discount = 0;
+            // Logika diskon (Statis vs AI) ...
+            if (type === 'STATIC') {
+                discount = (DAYS - d <= 3) ? 50 : (DAYS - d <= 7 ? 20 : 0);
+            } else {
+                // Di sini AI akan mengambil keputusan dari q_table berdasarkan state produk ini
+                discount = [0, 10, 20, 30, 50][Math.floor(Math.random() * 5)]; // Placeholder logic
+            }
+
+            const currentPrice = NORMAL_PRICE * (1 - discount/100);
+            let sold = Math.min(stock, Math.max(1, Math.floor(4 + (discount/10))));
+            stock -= sold;
+            totalProfit += (sold * (currentPrice - BASE_PRICE));
+
+            history.push({ day: d, profit: totalProfit, stock: stock, discount: discount });
+            if (stock <= 0) break;
+        }
+        return { totalProfit, totalWaste: stock, history };
+    };
+
+    const staticRes = await runScenario('STATIC');
+    const aiRes = await runScenario('AI_ONLY');
+    const hitlRes = await runScenario('AI_HITL');
+
+    res.json({ 
+        productName: p.name, 
+        staticRes, aiRes, hitlRes 
+    });
+});
+
+// backend/index.js
+
+// API untuk menjalankan simulasi spesifik per produk
+app.get('/api/simulation/product/:productId', async (req, res) => {
+    const { productId } = req.params;
+    
+    try {
+        // Ambil data produk & batch
+        const batchRes = await pool.query(`
+            SELECT b.*, p.base_price, p.normal_price, p.name 
+            FROM product_batches b 
+            JOIN products p ON b.product_id = p.id 
+            WHERE p.id = $1 AND b.current_stock > 0
+            ORDER BY b.expiry_date ASC LIMIT 1
+        `, [productId]);
+
+        if (batchRes.rows.length === 0) return res.status(404).json({ message: "Produk tidak punya stok aktif" });
+
+        const batch = batchRes.rows[0];
+        // Panggil fungsi runScenario yang sudah kita buat sebelumnya (dari tahap Research Lab)
+        // Sesuaikan dengan data produk yang dinamis ini
+        const result = await runScenarioWithData(batch); 
+
+        res.json({
+            productName: batch.name,
+            results: result
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // --- LISTEN (Wajib di Paling Bawah) ---
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

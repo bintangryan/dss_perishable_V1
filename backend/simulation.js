@@ -5,29 +5,47 @@ const ALPHA = 0.2;
 const GAMMA = 0.9;
 const ACTIONS = [0, 10, 20, 30, 50];
 
-async function runSim() {
-    console.log("🚀 MEMULAI SIMULASI PELATIHAN AI (30 HARI)");
+// Mengambil Product ID dari argument terminal (contoh: node simulation.js 1)
+const targetProductId = process.argv[2] || 1; 
+
+async function runSim(productId) {
+    console.log(`🚀 MEMULAI SIMULASI PRODUK ID: ${productId}`);
     
-    // Ambil data segar dari DB
-    const batchRes = await pool.query('SELECT * FROM product_batches WHERE id = 1');
-    if (batchRes.rows.length === 0) return console.log("❌ Data batch tidak ditemukan.");
+    // 1. Ambil data batch terbaru untuk produk terpilih
+    const query = `
+        SELECT b.*, p.base_price, p.normal_price, p.name 
+        FROM product_batches b 
+        JOIN products p ON b.product_id = p.id 
+        WHERE p.id = $1 AND b.current_stock > 0
+        ORDER BY b.expiry_date ASC LIMIT 1
+    `;
+    const batchRes = await pool.query(query, [productId]);
     
-    // Gunakan let untuk variabel yang akan berubah selama simulasi
-    let currentStock = batchRes.rows[0].current_stock;
-    const expiryDate = new Date(batchRes.rows[0].expiry_date);
-    const productId = batchRes.rows[0].id;
+    if (batchRes.rows.length === 0) {
+        return console.log(`❌ Tidak ada batch aktif untuk Produk ID ${productId}`);
+    }
+    
+    const batch = batchRes.rows[0];
+    console.log(`📦 Mensimulasikan: ${batch.name} | Stok: ${batch.current_stock}`);
+
+    let currentStock = batch.current_stock;
+    const expiryDate = new Date(batch.expiry_date);
+    const basePrice = parseFloat(batch.base_price);
+    const normalPrice = parseFloat(batch.normal_price);
 
     for (let day = 1; day <= 30; day++) {
-        // A. HITUNG STATE SAAT INI
         const today = new Date();
-        // Simulasi hari yang berjalan (menambah 'day' ke hari ini)
         const simDate = new Date(today);
         simDate.setDate(simDate.getDate() + (day - 1));
         
         const daysLeft = Math.ceil((expiryDate - simDate) / (1000 * 60 * 60 * 24));
-        const state = calculateState(daysLeft, currentStock, 5, false);
+        if (daysLeft < 0) break;
 
-        // B. AI MEMILIH AKSI (Epsilon-Greedy Sederhana: 90% Best, 10% Random)
+        // Simulasi Tren Penjualan (V) - dinamis berdasarkan hari simulasi
+        const mockSalesTrend = (day > 5 && day < 10) ? 0.7 : 1.1; 
+        const state = calculateState(daysLeft, currentStock, 5, simDate.getDay() % 6 === 0, mockSalesTrend);
+
+        // A. AI PILIH AKSI
         let qRow = await pool.query('SELECT * FROM q_table WHERE state_id = $1', [state]);
         if (qRow.rows.length === 0) {
             await pool.query('INSERT INTO q_table (state_id) VALUES ($1)', [state]);
@@ -35,43 +53,31 @@ async function runSim() {
         }
         
         const qValues = qRow.rows[0];
-        let bestAction = 0;
-        
-        // Logika Epsilon-Greedy agar AI mau mencoba hal baru (Exploration)
-        if (Math.random() < 0.1) {
-            bestAction = ACTIONS[Math.floor(Math.random() * ACTIONS.length)];
-        } else {
-            let maxQ = -Infinity;
-            ACTIONS.forEach(a => {
-                if (qValues[`a_${a}`] > maxQ) {
-                    maxQ = qValues[`a_${a}`];
-                    bestAction = a;
-                }
-            });
-        }
+        let bestAction = (Math.random() < 0.1) 
+            ? ACTIONS[Math.floor(Math.random() * ACTIONS.length)] 
+            : ACTIONS.reduce((a, b) => qValues[`a_${a}`] > qValues[`a_${b}`] ? a : b);
 
-        // C. SIMULASI PASAR
-        let baseDemand = 3; 
-        let bonusDemand = Math.floor(bestAction / 10); 
-        let sold = Math.min(currentStock, baseDemand + bonusDemand);
+        // B. SIMULASI PASAR (Stokastik)
+        const currentPrice = normalPrice * (1 - bestAction/100);
+        let baseDemand = 4;
+        let boost = Math.floor(bestAction / 10) * 1.5; 
+        let noise = Math.floor(Math.random() * 3) - 1; 
+        
+        let sold = Math.min(currentStock, Math.max(0, Math.floor((baseDemand + boost) * mockSalesTrend) + noise));
         currentStock -= sold;
 
-        // D. HITUNG REWARD
-        let reward = 0;
-        if (sold > 0) reward += 5; // Reward per penjualan
-        
-        if (daysLeft <= 0 && currentStock > 0) {
-            reward -= 100; // Penalti Waste
-            currentStock = 0; 
-        } else if (currentStock === 0 && daysLeft >= 0) {
-            reward += 50; // Bonus Habis
+        // C. HITUNG REWARD
+        let profitToday = sold * (currentPrice - basePrice);
+        let reward = profitToday;
+
+        if (daysLeft === 0 && currentStock > 0) {
+            let loss = currentStock * basePrice; 
+            reward -= loss; 
+            console.log(`💀 WASTE! Rugi: -Rp${loss}`);
         }
 
-        // E. UPDATE Q-TABLE (Bellman Equation)
-        const nextDaysLeft = daysLeft - 1;
-        const nextState = calculateState(nextDaysLeft, currentStock, 5, false);
-        
-        // Pastikan nextState ada di DB agar bisa diambil Max Q-nya
+        // D. UPDATE Q-TABLE
+        const nextState = calculateState(daysLeft - 1, currentStock, 5, false, 1.0);
         let nextQRow = await pool.query('SELECT * FROM q_table WHERE state_id = $1', [nextState]);
         if (nextQRow.rows.length === 0) {
             await pool.query('INSERT INTO q_table (state_id) VALUES ($1)', [nextState]);
@@ -80,18 +86,19 @@ async function runSim() {
         
         const nQ = nextQRow.rows[0];
         const maxNextQ = Math.max(nQ.a_0, nQ.a_10, nQ.a_20, nQ.a_30, nQ.a_50);
-
-        // Rumus Q-Learning Utuh
-        const currentQ = qValues[`a_${bestAction}`];
-        const newQ = currentQ + ALPHA * (reward + (GAMMA * maxNextQ) - currentQ);
+        const newQ = qValues[`a_${bestAction}`] + ALPHA * (reward + (GAMMA * maxNextQ) - qValues[`a_${bestAction}`]);
 
         await pool.query(`UPDATE q_table SET a_${bestAction} = $1 WHERE state_id = $2`, [newQ, state]);
 
-        console.log(`Hari ${day} | State: ${state} | Action: ${bestAction}% | Sold: ${sold} | Stock: ${currentStock}`);
+        console.log(`Hari ${day} | Diskon: ${bestAction}% | Laku: ${sold} | Stok: ${currentStock} | Reward: ${reward.toFixed(0)}`);
         
-        if (currentStock <= 0) break;
+        if (currentStock <= 0) {
+            console.log("✅ Stok Habis!");
+            break;
+        }
     }
-    console.log("--- SIMULASI SELESAI ---");
+    console.log(`--- SIMULASI PRODUK ${batch.name} SELESAI ---`);
 }
 
-runSim();
+// Jalankan simulasi berdasarkan ID yang diberikan
+runSim(targetProductId);

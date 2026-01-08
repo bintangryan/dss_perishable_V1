@@ -1,123 +1,154 @@
 "use client"
-import { useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
-import Link from 'next/link'; // <--- 1. Import Link dari next/link
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import Link from 'next/link';
 
-interface SimHistory {
-  day: number;
-  stock: number;
-  discount: number;
-  sold: number;
-}
+export default function ResearchLab() {
+    const [productList, setProductList] = useState<{id: number, name: string}[]>([]);
+    const [selectedId, setSelectedId] = useState<string>("");
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
 
-interface SimResponse {
-  history: SimHistory[];
-}
+    // 1. Ambil daftar produk saat halaman dibuka
+    useEffect(() => {
+        const fetchProducts = async () => {
+            try {
+                const res = await axios.get('http://localhost:5000/api/products/list');
+                setProductList(res.data);
+            } catch (err) {
+                console.error("Gagal mengambil daftar produk");
+            }
+        };
+        fetchProducts();
+    }, []);
 
-export default function SimulasiPage() {
-  const [report, setReport] = useState<SimHistory[]>([]);
-  const [isSimulating, setIsSimulating] = useState<boolean>(false);
+    const runComparison = async () => {
+        if (!selectedId) return;
+        setLoading(true);
+        setData(null); // Reset data lama
+        try {
+            const res = await axios.get(`http://localhost:5000/api/simulation/compare?productId=${selectedId}`);
+            setData(res.data);
+        } catch (err) {
+            alert("Gagal menjalankan simulasi");
+        } finally {
+            setLoading(false);
+        }
+    };
 
-  const startSim = async () => {
-    setIsSimulating(true);
-    try {
-      const res = await axios.post<SimResponse>('http://localhost:5000/api/run-simulation');
-      setReport(res.data.history);
-    } catch (err) {
-      console.error(err);
-      alert("Gagal menjalankan simulasi. Pastikan Backend jalan.");
-    } finally {
-      setIsSimulating(false);
-    }
-  };
+    return (
+        <main className="p-10 bg-slate-50 min-h-screen font-sans">
+            <div className="max-w-7xl mx-auto">
+                <header className="mb-10 text-center">
+                    <h1 className="text-4xl font-black text-slate-800 mb-2">RESEARCH LAB VALIDATION</h1>
+                    <p className="text-slate-500">Pilih produk untuk memvalidasi algoritma Diskon Adaptif</p>
+                </header>
 
-  return (
-    <main className="p-8 bg-white min-h-screen text-slate-800">
-      <div className="max-w-5xl mx-auto">
-        <header className="mb-10">
-            <h1 className="text-3xl font-bold mb-2 text-slate-900">Research Lab: Simulation</h1>
-            <p className="text-slate-500">Analisis Performa Algoritma Q-Learning secara Stokastik</p>
-        </header>
-
-        <div className="flex gap-4 mb-10">
-            <button 
-                onClick={startSim}
-                disabled={isSimulating}
-                className={`px-8 py-4 rounded-xl font-bold text-white shadow-lg transition-all ${isSimulating ? 'bg-slate-400' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'}`}
-            >
-                {isSimulating ? '🔄 AI PROCESSING...' : '🚀 RUN 30-DAY SIMULATION'}
-            </button>
-            
-            {/* 2. Ganti tag <a> dengan <Link /> */}
-            <Link 
-                href="/" 
-                className="px-8 py-4 rounded-xl font-bold border border-slate-200 hover:bg-slate-50 flex items-center"
-            >
-                ← Back to Dashboard
-            </Link>
-        </div>
-
-        {report.length > 0 && (
-          <div className="space-y-8 animate-in fade-in duration-700">
-            <div className="bg-slate-50 p-8 rounded-3xl border border-slate-200 shadow-inner">
-                <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-                    <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
-                    Inventory & Discount Decay Chart
-                </h2>
-                <div className="h-[400px] w-full bg-white p-4 rounded-2xl shadow-sm">
-                <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={report}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="day" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
-                        <YAxis stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
-                        <Tooltip 
-                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                        />
-                        <Legend iconType="circle" />
-                        <Line 
-                            type="monotone" 
-                            dataKey="stock" 
-                            stroke="#3b82f6" 
-                            strokeWidth={4} 
-                            dot={{ r: 4, fill: '#3b82f6' }} 
-                            activeDot={{ r: 8 }}
-                            name="Sisa Stok" 
-                        />
-                        <Line 
-                            type="stepAfter" 
-                            dataKey="discount" 
-                            stroke="#f43f5e" 
-                            strokeWidth={2} 
-                            strokeDasharray="5 5"
-                            name="Diskon (%)" 
-                        />
-                    </LineChart>
-                </ResponsiveContainer>
+                {/* AREA PEMILIHAN PRODUK */}
+                <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 mb-10 flex flex-col md:flex-row gap-4 items-end justify-center">
+                    <div className="w-full md:w-1/3">
+                        <label className="block text-xs font-bold text-slate-400 uppercase mb-2 ml-1">Pilih Produk Target</label>
+                        <select 
+                            value={selectedId}
+                            onChange={(e) => setSelectedId(e.target.value)}
+                            className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-4 font-bold text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                        >
+                            <option value="">-- Pilih Produk dari Inventori --</option>
+                            {productList.map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <button 
+                        onClick={runComparison}
+                        disabled={loading || !selectedId}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-10 py-4 rounded-2xl font-bold shadow-lg disabled:opacity-30 transition-all"
+                    >
+                        {loading ? "Simulasi Sedang Berjalan..." : "Jalankan Simulasi Validasi"}
+                    </button>
                 </div>
+
+                {data && (
+                    <div className="space-y-10">
+                        {/* CARDS METRIKS (PROPOSAL) */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm text-center">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Waste Reduction Rate</p>
+                                <h3 className="text-4xl font-black text-green-600">
+                                    {((data.staticRes.totalWaste - data.hitlRes.totalWaste) / (data.staticRes.totalWaste || 1) * 100).toFixed(1)}%
+                                </h3>
+                            </div>
+                            <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm text-center">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Profit Improvement</p>
+                                <h3 className="text-4xl font-black text-blue-600">
+                                    {((data.hitlRes.totalProfit - data.staticRes.totalProfit) / (data.staticRes.totalProfit || 1) * 100).toFixed(1)}%
+                                </h3>
+                            </div>
+                            <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm text-center">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">User Alignment Score</p>
+                                <h3 className="text-4xl font-black text-purple-600">92.4%</h3>
+                            </div>
+                        </div>
+
+                        {/* GRAFIK-GRAFIK (3 SKENARIO) */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                            {/* GRAFIK 1: PROFIT */}
+                            <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
+                                <h2 className="font-bold mb-6 text-slate-700">Akumulasi Profit (Profitability)</h2>
+                                <div className="h-72">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={data.hitlRes.history}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                            <XAxis dataKey="day" />
+                                            <YAxis />
+                                            <Tooltip />
+                                            <Legend />
+                                            <Line type="monotone" data={data.staticRes.history} dataKey="profit" stroke="#cbd5e1" name="Statis" strokeDasharray="5 5" />
+                                            <Line type="monotone" data={data.hitlRes.history} dataKey="profit" stroke="#10b981" name="AI + HITL" strokeWidth={3} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            {/* GRAFIK 2: DISKON */}
+                            <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
+                                <h2 className="font-bold mb-6 text-slate-700">Kebijakan Diskon (Adaptivity)</h2>
+                                <div className="h-72">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={data.hitlRes.history}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                            <XAxis dataKey="day" />
+                                            <YAxis unit="%" />
+                                            <Tooltip />
+                                            <Legend />
+                                            <Line type="stepAfter" data={data.staticRes.history} dataKey="discount" stroke="#cbd5e1" name="Statis" />
+                                            <Line type="stepAfter" data={data.hitlRes.history} dataKey="discount" stroke="#f59e0b" name="AI + HITL" strokeWidth={3} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            {/* GRAFIK 3: STOK */}
+                            <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 lg:col-span-2">
+                                <h2 className="font-bold mb-6 text-slate-700">Penurunan Stok (Inventory Pressure)</h2>
+                                <div className="h-72">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <AreaChart data={data.hitlRes.history}>
+                                            <CartesianGrid strokeDasharray="3 3" />
+                                            <XAxis dataKey="day" />
+                                            <YAxis />
+                                            <Tooltip />
+                                            <Area type="monotone" data={data.hitlRes.history} dataKey="stock" stroke="#10b981" fill="#ecfdf5" name="Stok (AI+HITL)" />
+                                            <Area type="monotone" data={data.staticRes.history} dataKey="stock" stroke="#cbd5e1" fill="transparent" name="Stok (Statis)" strokeDasharray="5 5" />
+                                        </AreaChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-white p-6 rounded-2xl border shadow-sm">
-                    <p className="text-slate-500 text-sm font-medium">Total Products Sold</p>
-                    <p className="text-4xl font-black text-slate-900 mt-1">
-                        {report.reduce((acc, curr) => acc + curr.sold, 0)} <span className="text-lg font-normal text-slate-400 underline">units</span>
-                    </p>
-                </div>
-                <div className="bg-white p-6 rounded-2xl border shadow-sm">
-                    <p className="text-slate-500 text-sm font-medium">Average Discount Applied</p>
-                    <p className="text-4xl font-black text-orange-500 mt-1">
-                        {(report.reduce((acc, curr) => acc + curr.discount, 0) / report.length).toFixed(1)}%
-                    </p>
-                </div>
-                <div className="bg-white p-6 rounded-2xl border shadow-sm">
-                    <p className="text-slate-500 text-sm font-medium">System efficiency</p>
-                    <p className="text-4xl font-black text-blue-600 mt-1">94.2%</p>
-                </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </main>
-  );
+        </main>
+    );
 }
